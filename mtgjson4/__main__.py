@@ -16,8 +16,8 @@ import time
 
 import mtgjson4.globals
 
-OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / 'set_outputs'
-ALL_STUFF_OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / 'all_outputs'
+SET_OUT_DIR = pathlib.Path(__file__).resolve().parent.parent / 'set_outputs'
+COMP_OUT_DIR = pathlib.Path(__file__).resolve().parent.parent / 'compiled_outputs'
 SET_CONFIG_DIR = pathlib.Path(__file__).resolve().parent / 'set_configs'
 
 
@@ -151,18 +151,13 @@ async def download_cards_by_mid_list(session, set_name, multiverse_ids, loop=Non
         mana_row = soup_oracle.find(id=div_name.format('manaRow'))
         if mana_row:
             mana_row = mana_row.findAll('div')[-1]
-            mana_row = mana_row.findAll('img')
 
             card_colors = set()
-            card_cost = ''
 
-            for symbol in mana_row:
-                symbol_value = symbol['alt']
-                symbol_mapped = mtgjson4.globals.get_symbol_short_name(symbol_value)
-                card_cost += f'{{{symbol_mapped}}}'
-                if symbol_mapped in mtgjson4.globals.COLORS:
-                    card_color_identity.add(symbol_mapped)
-                    card_colors.add(symbol_mapped)
+            mana_colors = replace_symbol_images_with_tokens(mana_row)
+            card_cost = mana_row.get_text(strip=True)
+            card_color_identity.update(mana_colors)
+            card_colors.update(mana_colors)
 
             # Sort field in WUBRG order
             card_colors = sorted(
@@ -218,13 +213,7 @@ async def download_cards_by_mid_list(session, set_name, multiverse_ids, loop=Non
             card_text = ''
             for div in text_row:
                 # Start by replacing all images with alternative text
-                images = div.findAll('img')
-                for symbol in images:
-                    symbol_value = symbol['alt']
-                    symbol_mapped = mtgjson4.globals.get_symbol_short_name(symbol_value)
-                    symbol.replace_with(f'{{{symbol_mapped}}}')
-                    if symbol_mapped in mtgjson4.globals.COLORS:
-                        card_color_identity.add(symbol_mapped)
+                card_color_identity.update(replace_symbol_images_with_tokens(div))
 
                 # Next, just add the card text, line by line
                 card_text += div.get_text() + '\n'
@@ -308,6 +297,9 @@ async def download_cards_by_mid_list(session, set_name, multiverse_ids, loop=Non
         if rulings_row is not None:
             rulings_dates = rulings_row.findAll('td', id=re.compile(r'\w*_rulingDate\b'))
             rulings_text = rulings_row.findAll('td', id=re.compile(r'\w*_rulingText\b'))
+            for ruling_text in rulings_text:
+                replace_symbol_images_with_tokens(ruling_text)
+
             card_info['rulings'] = [
                 {
                     'date': ruling_date.get_text(),
@@ -343,6 +335,24 @@ async def download_cards_by_mid_list(session, set_name, multiverse_ids, loop=Non
                 card_variations.remove(card_info['multiverseid'])  # Don't need this card's MID in its variations
 
             card_info['variations'] = card_variations
+
+    def replace_symbol_images_with_tokens(tag):
+        """
+        Replaces the img tags of symbols with token representations
+        :rtype: set
+        :param tag:
+        :return: The color symbols found
+        """
+        colors_found = set()
+        images = tag.findAll('img')
+        for symbol in images:
+            symbol_value = symbol['alt']
+            symbol_mapped = mtgjson4.globals.get_symbol_short_name(symbol_value)
+            symbol.replace_with(f'{{{symbol_mapped}}}')
+            if symbol_mapped in mtgjson4.globals.COLORS:
+                colors_found.add(symbol_mapped)
+
+        return colors_found
 
     async def build_legalities_part(card_mid, card_info):
         try:
@@ -531,15 +541,16 @@ async def download_cards_by_mid_list(session, set_name, multiverse_ids, loop=Non
     ]
 
     additional_cards = []
+    cards_in_set = []
 
     # then wait until all of them are completed
-    await asyncio.wait(futures)
-    cards_in_set = []
-    for future in futures:
-        card_future = future.result()
-        cards_in_set.append(card_future)
+    with contextlib.suppress(ValueError):  # Happens if no cards are in the multiverse_ids
+        await asyncio.wait(futures)
+        for future in futures:
+            card_future = future.result()
+            cards_in_set.append(card_future)
 
-    with contextlib.suppress(ValueError):  # if no double-sided cards, gracefully skip
+    with contextlib.suppress(ValueError):  # If no double-sided cards, gracefully skip
         await asyncio.wait(additional_cards)
         for future in additional_cards:
             card_future = future.result()
@@ -672,18 +683,18 @@ async def build_set(session, set_name, language):
         json_ready = await apply_set_config_options(set_name, cards_holder)
 
         print('BuildSet: Generated JSON for {}'.format(set_stat))
-        with (OUTPUT_DIR / '{}.json'.format(set_output)).open('w', encoding='utf-8') as fp:
+        with (SET_OUT_DIR / '{}.json'.format(set_output)).open('w', encoding='utf-8') as fp:
             json.dump(json_ready, fp, indent=4, sort_keys=True, ensure_ascii=False)
             print('BuildSet: JSON written for {0} ({1})'.format(set_stat, set_name[1]))
 
         return json_ready
 
     async def build_foreign_language():
-        if not os.path.isfile(os.path.join(OUTPUT_DIR, '{}.json'.format(set_name[1]))):
+        if not os.path.isfile(os.path.join(SET_OUT_DIR, '{}.json'.format(set_name[1]))):
             print('BuildSet: Set {0} not built in English. Do that first before {1}'.format(set_name[1], language))
             return
 
-        with (OUTPUT_DIR / '{}.json'.format(set_name[1])).open('r', encoding='utf-8') as fp:
+        with (SET_OUT_DIR / '{}.json'.format(set_name[1])).open('r', encoding='utf-8') as fp:
             json_input = json.load(fp)
 
         if ('translations' not in json_input.keys()) or (language not in json_input['translations'].keys()):
@@ -709,7 +720,7 @@ async def build_set(session, set_name, language):
 
 
 async def main(loop, session, language_to_build):
-    OUTPUT_DIR.mkdir(exist_ok=True)  # make sure set_outputs dir exists
+    SET_OUT_DIR.mkdir(exist_ok=True)  # make sure set_outputs dir exists
 
     async with session:
         # start asyncio tasks for building each set
@@ -722,7 +733,7 @@ async def main(loop, session, language_to_build):
 
 
 def create_all_sets_files():
-    ALL_STUFF_OUTPUT_DIR.mkdir(exist_ok=True)
+    COMP_OUT_DIR.mkdir(exist_ok=True)
 
     # Set Variables
     all_sets = dict()
@@ -823,8 +834,8 @@ def create_all_sets_files():
 
     # LoadJSON
     sets_in_output = list()
-    for file in os.listdir(OUTPUT_DIR):
-        with pathlib.Path(OUTPUT_DIR, file).open('r', encoding='utf-8') as fp:
+    for file in os.listdir(SET_OUT_DIR):
+        with pathlib.Path(SET_OUT_DIR, file).open('r', encoding='utf-8') as fp:
             file_content = json.load(fp)
             sets_in_output.append(file_content)
 
@@ -846,7 +857,7 @@ def create_all_sets_files():
 
     # saveFullJSON
     def save(f_name, data):
-        with (ALL_STUFF_OUTPUT_DIR / '{}.json'.format(f_name)).open('w', encoding='utf-8') as save_fp:
+        with (COMP_OUT_DIR / '{}.json'.format(f_name)).open('w', encoding='utf-8') as save_fp:
             json.dump(data, save_fp, indent=4, sort_keys=True, ensure_ascii=False)
         return len(data)
 
@@ -881,7 +892,7 @@ if __name__ == '__main__':
     parser.add_argument('--all-sets', action='store_true', help='Build all sets')
 
     parser.add_argument('--full-out', action='store_true',
-                       help='Create the AllCards, AllSets, and AllSetsArray files (using what\'s in set_outputs dir)')
+                        help='Create the AllCards, AllSets, and AllSetsArray files (using what\'s in set_outputs dir)')
 
     parser.add_argument('--language', default=['en'], metavar='LANG', type=str, nargs=1,
                         help='Build foreign language version (English must have been built prior)')
@@ -916,7 +927,7 @@ if __name__ == '__main__':
     start_time = time.time()
 
     card_loop = asyncio.get_event_loop()
-    card_session = aiohttp.ClientSession(loop=card_loop, raise_for_status=True)
+    card_session = aiohttp.ClientSession(loop=card_loop, raise_for_status=True, conn_timeout=None, read_timeout=None)
     card_loop.run_until_complete(main(card_loop, card_session, lang_to_process))
 
     if cl_args['full_out']:
